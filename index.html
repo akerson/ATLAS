@@ -268,8 +268,12 @@ input[type=text]:focus{border-color:var(--p);background:var(--white)}
       <div class="sinfo"><div class="sname" id="sn-5">FRS — Phase 1</div><div class="sdesc">FRS grounded in physical model</div></div>
     </div>
     <div id="si-6" class="sitem">
-      <div class="strack"><div class="sdot" id="dot-6">6</div></div>
+      <div class="strack"><div class="sdot" id="dot-6">6</div><div class="sline" id="line-6"></div></div>
       <div class="sinfo"><div class="sname" id="sn-6">FHX Export</div><div class="sdesc">DeltaV phase FHX file</div></div>
+    </div>
+    <div id="si-7" class="sitem">
+      <div class="strack"><div class="sdot" id="dot-7">7</div></div>
+      <div class="sinfo"><div class="sname" id="sn-7">C&amp;Q Protocol</div><div class="sdesc">CSA test protocol for the phase</div></div>
     </div>
 
     <hr class="sdivider">
@@ -461,6 +465,44 @@ input[type=text]:focus{border-color:var(--p);background:var(--white)}
         <div class="fhx-bar"><div class="dot"></div>DeltaV Phase FHX — Draft<div class="fhx-flag" style="display:flex;gap:10px;align-items:center"><span style="opacity:.6;font-size:9px">click to edit</span> Engineer review required before use</div></div>
         <div class="fhx-content" id="fhx-content" contenteditable="true" spellcheck="false" title="Click to edit FHX directly"></div>
       </div>
+
+      <div style="margin-top:18px;display:flex;gap:10px;align-items:center">
+        <button class="btn btn-p" id="btn-cq" onclick="runCQ()"><div class="spin"></div><span class="blbl">Generate C&amp;Q Protocol</span></button>
+        <span style="font-size:12px;color:var(--muted)">CSA-aligned test protocol for the phase — runs on equipment, derived from FRS + FHX.</span>
+      </div>
+      <div class="s-error" id="err-cq"></div>
+      <div class="hidden" id="prog-cq" style="margin-top:12px">
+        <div class="progress-bar"><div class="progress-fill" id="pf-cq" style="width:0%"></div></div>
+        <div class="progress-lbl" id="pl-cq">Generating C&amp;Q protocol...</div>
+      </div>
+    </div>
+
+    <!-- ─── STEP 7: C&Q Protocol ───────────────────────── -->
+    <div id="sec-7" class="hidden">
+      <div class="peyebrow">Step 7</div>
+      <div class="ptitle">C&amp;Q Protocol — <span id="cq-phase-name"></span></div>
+      <div class="pdesc">CSA-aligned commissioning &amp; qualification test protocol for the generated phase. Intended for execution on the actual equipment by a qualified tester. Risk record + 2-D trace matrix + structured test cases. Re-run if upstream FRS/FHX is edited.</div>
+
+      <!-- Edit bar for C&Q -->
+      <div class="section-edit-bar" id="edit-bar-cq" style="display:none">
+        <button class="edit-toggle" id="edit-toggle-cq" onclick="toggleEdit('cq')">&#9998; Edit C&amp;Q Content</button>
+        <span class="edit-hint">Modify risk rationale, trace matrix cells, or test case steps before download.</span>
+      </div>
+      <div class="json-editor-wrap" id="json-wrap-cq">
+        <div class="flbl">C&amp;Q JSON — edit and apply to update the display</div>
+        <textarea class="json-editor" id="json-cq" rows="14"></textarea>
+        <div style="display:flex;gap:10px;align-items:center">
+          <button class="json-apply" onclick="applyEdit('cq')">Apply Changes</button>
+          <span class="json-err" id="json-err-cq">Invalid JSON — check syntax and try again.</span>
+        </div>
+      </div>
+      <div id="cq-output"></div>
+
+      <div style="margin-top:18px;display:flex;gap:10px;align-items:center">
+        <button class="btn btn-p" onclick="downloadCQDocx()" style="background:var(--mid)">Download C&amp;Q .docx</button>
+        <button class="btn btn-g" onclick="goBack(6,7)">Back</button>
+        <button class="btn btn-g" onclick="resetAll()">New Process</button>
+      </div>
     </div>
 
   </main>
@@ -471,21 +513,23 @@ input[type=text]:focus{border-color:var(--p);background:var(--white)}
 const API='https://api.anthropic.com/v1/messages';
 let state={
   narrative:'', phases:[], physModel:null,
-  phaseSeq:null, frsPhase1:null, frsParams:null, fhxText:''
+  phaseSeq:null, frsPhase1:null, frsParams:null, fhxText:'',
+  cqRisk:null, cqMatrix:null, cqTestCases:null
 };
 
 // ─── API Key ─────────────────────────────────────────────────────────────────
 function saveKey(){
   const inp=document.getElementById('aki');
+  const w=inp.closest('.akw');
+  if(w.querySelector('.akreset')) return;
   const val=inp.value.trim();
   if(!val.startsWith('sk-ant-')){inp.style.borderColor='#CC0033';return}
   window._apiKey=val;
   inp.classList.add('set');
   inp.value=val.slice(0,12)+'••••••••••••••••••••';
   inp.disabled=true;
-  const w=inp.closest('.akw');
   const rb=document.createElement('button');
-  rb.className='aksave';rb.style.background='var(--subtle)';rb.textContent='Reset';
+  rb.className='aksave akreset';rb.style.background='var(--subtle)';rb.textContent='Reset';
   rb.onclick=()=>{window._apiKey='';inp.value='';inp.disabled=false;inp.classList.remove('set');inp.style.borderColor='';w.removeChild(rb)};
   w.appendChild(rb);
 }
@@ -507,15 +551,41 @@ async function claude(system, user, maxTokens=3000){
 function parseJSON(raw){
   let s=raw.trim().replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/i,'').trim();
   try{return JSON.parse(s)}catch(e){}
+  // Strip trailing commas before } or ]
+  const stripTrailing=str=>str.replace(/,(\s*[}\]])/g,'$1');
+  const balance=str=>{
+    let br=0,bk=0,inStr=false,esc=false;
+    for(const c of str){
+      if(esc){esc=false;continue}
+      if(c==='\\'&&inStr){esc=true;continue}
+      if(c==='"'){inStr=!inStr;continue}
+      if(inStr)continue;
+      if(c==='{')br++;else if(c==='}')br--;else if(c==='[')bk++;else if(c===']')bk--;
+    }
+    let out=str;
+    if(inStr)out+='"';
+    while(bk>0){out+=']';bk--}
+    while(br>0){out+='}';br--}
+    return out;
+  };
+  try{return JSON.parse(balance(stripTrailing(s)))}catch(e){}
+  // Truncate to last complete object inside a top-level array, then balance
+  let attempt=s;
+  for(let i=0;i<5;i++){
+    try{return JSON.parse(balance(stripTrailing(attempt)))}catch(e){
+      const m=/position\s+(\d+)/.exec(e.message);
+      const pos=m?parseInt(m[1],10):attempt.length;
+      const slice=attempt.slice(0,pos);
+      const cut=slice.lastIndexOf('},');
+      if(cut===-1)break;
+      attempt=attempt.slice(0,cut+1); // keep the } drop the ,
+    }
+  }
+  // Last-ditch: original lastIndexOf('}') strategy
   try{
     const lb=s.lastIndexOf('}');
     if(lb===-1)throw new Error('no obj');
-    let t=s.slice(0,lb+1);
-    let br=0,bk=0;
-    for(const c of t){if(c==='{')br++;else if(c==='}')br--;else if(c==='[')bk++;else if(c===']')bk--;}
-    while(br>0){t+='}';br--}
-    while(bk>0){t+=']';bk--}
-    return JSON.parse(t);
+    return JSON.parse(balance(stripTrailing(s.slice(0,lb+1))));
   }catch(e2){throw new Error('JSON parse failed: '+e2.message)}
 }
 
@@ -532,7 +602,7 @@ function setStep(n,state){
   if(line)line.className='sline'+(state==='done'?' done':'');
 }
 function showSection(n){
-  for(let i=1;i<=6;i++)document.getElementById('sec-'+i).classList.toggle('hidden',i!==n);
+  for(let i=1;i<=7;i++)document.getElementById('sec-'+i).classList.toggle('hidden',i!==n);
 }
 function goBack(target,current){showSection(target);setStep(current,'');setStep(target,'active')}
 function load(id,on){const b=document.getElementById(id);b.disabled=on;on?b.classList.add('loading'):b.classList.remove('loading')}
@@ -1478,6 +1548,525 @@ async function downloadFRSDocx(){
   btn.disabled=false;btn.textContent='Download FRS .docx';
 }
 
+// ─── STEP 6 → 7: C&Q Protocol (CSA-aligned) ──────────────────────────────────
+const CQ_CATS=[
+  {key:'functional',     label:'Functional / Happy-Path'},
+  {key:'boundary',       label:'Parameter Boundary'},
+  {key:'alarm',          label:'Alarm & Interlock'},
+  {key:'failure',        label:'Failure-Mode / Negative'},
+  {key:'hold_resume',    label:'Hold / Resume / Restart'},
+  {key:'data_integrity', label:'Data Integrity (ALCOA+)'}
+];
+
+async function runCQ(){
+  clrErr('err-cq');
+  if(!state.frsPhase1){ showErr('err-cq','Generate the FRS first.'); return; }
+  if(!state.fhxText){ showErr('err-cq','Generate the FHX first.'); return; }
+  if(!window._apiKey){ showApiModal(); return; }
+  load('btn-cq',true);show('prog-cq');
+  setStep(7,'spinning');
+
+  const phase1=state.phases[0]||{name:'Phase 1'};
+  const model=state.physModel||{};
+  const detail=state.frsPhase1?.detail||{};
+  const params=state.frsParams?.parameters||[];
+
+  // Compact context blocks — keep prompt focused, avoid token bloat
+  const emSummary=(model.equipment_modules||[]).map(em=>
+    `${em.tag} (${em.name}): tags=[${(em.instrumentation||[]).map(t=>t.tag).join(', ')}] cmds=[${(em.commands||[]).map(c=>c.name).join(', ')}]`
+  ).join('\n');
+  const soeSummary=(detail.sequence_of_events||[]).map(s=>`  ${s.step}. ${s.action}`).join('\n');
+  const almsSummary=[
+    ...(detail.critical_alarms?.enable||[]).map(a=>`ENABLE ${a.alarm} — ${a.description}`),
+    ...(detail.critical_alarms?.disable||[]).map(a=>`DISABLE ${a.alarm} — ${a.description}`)
+  ].join('\n');
+  const rpSummary=(detail.report_parameters||[]).map(r=>`${r.parameter} (${r.tag_reference}) @ ${r.capture_point}`).join('\n');
+  const hmSummary=(detail.hold_monitors||[]).map(h=>`${h.monitor} — ${h.condition} → ${h.action}`).join('\n');
+  const paramsSummary=params.map(p=>`${p.name} = ${p.typical_value} ${p.units} (${p.description})`).join('\n');
+  // FHX excerpt — first 4000 chars to stay grounded without blowing context
+  const fhxExcerpt=(state.fhxText||'').slice(0,4000);
+
+  const ctx=`UNIT OPERATION NARRATIVE:
+${state.narrative}
+
+PHASE UNDER TEST: ${phase1.name}
+Description: ${phase1.description||''}
+
+PHYSICAL MODEL:
+Process Cell: ${model.process_cell||''}
+Unit: ${model.unit||''}
+${emSummary}
+
+FRS — RECIPE PARAMETERS:
+${paramsSummary}
+
+FRS — SEQUENCE OF EVENTS:
+${soeSummary}
+
+FRS — CRITICAL ALARMS:
+${almsSummary}
+
+FRS — REPORT PARAMETERS:
+${rpSummary}
+
+FRS — HOLD MONITORS:
+${hmSummary}
+
+FHX EXCERPT (DeltaV phase step IDs S010, S020... and parameter paths visible here):
+${fhxExcerpt}`;
+
+  // ─── Stage 1: risk record + 2-D trace matrix skeleton ────────────────────────
+  const SYS_STAGE1=`You are a pharmaceutical Commissioning & Qualification (C&Q) lead with deep CSA (FDA Computer Software Assurance, 2022 draft guidance) expertise and a GAMP 5 background.
+
+Generate the risk record and trace matrix for a CSA-aligned test protocol covering ONE batch phase. The protocol is executed on the actual equipment by a qualified tester.
+
+REQUIREMENT EXTRACTION:
+- Walk every distinct functional behaviour, recipe parameter, alarm/interlock, and phase transition in the FRS.
+- Mint a typed REQ-ID per requirement:
+    REQ-FUNC-### → functional / sequence step requirement
+    REQ-PARAM-### → recipe parameter (one per parameter)
+    REQ-ALM-### → critical alarm / interlock (one per alarm)
+    REQ-XSN-### → phase transition (start/end/hold conditions)
+- Number sequentially within each type starting at 001.
+
+RISK SCORING (hybrid model — GAMP table + CSA narrative):
+- impact_category: one of "Patient Safety" | "Product Quality" | "Data Integrity" | "Business"
+- severity: H | M | L
+- likelihood: H | M | L (likelihood of an undetected failure escaping to production use)
+- risk_priority: H | M | L (overall — HH/HM → H; ML/MM → M; LL → L)
+- critical_thinking_rationale: 1-2 sentences — CSA-style: state intended use of this requirement, process risk if it fails, and why the chosen test depth is appropriate. This is the auditor-facing narrative.
+
+2-D TRACE MATRIX:
+- Columns are 6 fixed test categories: functional, boundary, alarm, failure, hold_resume, data_integrity
+- For each REQ-ID × category cell, EITHER:
+    {"tc_id": "TC-<TYPE>-###-NN"}  (mint a stable TC-ID; NN starts at 01 per req)
+  OR:
+    {"na": true, "justification": "one-sentence risk-based reason this category does not apply"}
+- DEPTH MODULATION by risk_priority:
+    H → all 6 categories generate a TC-ID
+    M → functional, boundary, alarm generate TC-IDs; failure/hold_resume/data_integrity are na with justification
+    L → only functional generates a TC-ID; rest are na with justification
+- Some categories may also be na on H-risk items if genuinely not applicable (e.g., a pure data-integrity requirement has no "boundary"). Be honest — every na is an auditor-visible critical-thinking record.
+
+Return ONLY valid JSON (no markdown, no preamble):
+{
+  "intended_use": "1-2 paragraph statement of what this phase does and how its correct operation supports product/patient safety",
+  "system_description": "1 paragraph summarising the unit and EMs under test",
+  "test_strategy": "1 paragraph CSA framing — scripted vs unscripted balance, leveraged testing references (e.g., vendor-tested EMs), why the chosen depth is appropriate",
+  "requirements": [
+    {"req_id":"REQ-FUNC-001","type":"FUNC","text":"...","frs_source":"...","impact_category":"...","severity":"H","likelihood":"M","risk_priority":"H","critical_thinking_rationale":"..."}
+  ],
+  "matrix": [
+    {"req_id":"REQ-FUNC-001","cells":{
+      "functional":{"tc_id":"TC-FUNC-001-01"},
+      "boundary":{"tc_id":"TC-FUNC-001-02"},
+      "alarm":{"na":true,"justification":"..."},
+      "failure":{"tc_id":"TC-FUNC-001-03"},
+      "hold_resume":{"tc_id":"TC-FUNC-001-04"},
+      "data_integrity":{"tc_id":"TC-FUNC-001-05"}
+    }}
+  ]
+}`;
+
+  try{
+    setP('pf-cq','pl-cq',20,'Stage 1: risk record + trace matrix...');
+    const r1=await claude(SYS_STAGE1, ctx+'\n\nGenerate stage 1.', 12000);
+    const stage1=parseJSON(r1);
+    state.cqRisk={
+      intended_use:stage1.intended_use||'',
+      system_description:stage1.system_description||'',
+      test_strategy:stage1.test_strategy||'',
+      requirements:stage1.requirements||[]
+    };
+    state.cqMatrix=stage1.matrix||[];
+
+    // Collect TC-IDs needing bodies in stage 2
+    const tcIndex=[];
+    state.cqMatrix.forEach(row=>{
+      const req=state.cqRisk.requirements.find(r=>r.req_id===row.req_id);
+      CQ_CATS.forEach(cat=>{
+        const cell=row.cells?.[cat.key];
+        if(cell && cell.tc_id){
+          tcIndex.push({tc_id:cell.tc_id, req_id:row.req_id, category:cat.key, category_label:cat.label, req_text:req?.text||'', risk:req?.risk_priority||'M'});
+        }
+      });
+    });
+
+    // ─── Stage 2: test case bodies for every minted TC-ID ────────────────────────
+    setP('pf-cq','pl-cq',60,`Stage 2: ${tcIndex.length} test case bodies...`);
+
+    const SYS_STAGE2=`You are a pharmaceutical C&Q test author. Write executable test case bodies for a human tester to run on the actual equipment (DeltaV DCS + skid). Paper/PDF execution — fields for actual result, initials, timestamp, deviation# are blank.
+
+For each test case in the input list, write:
+- title: short noun phrase (≤80 chars)
+- prereqs: 2-4 bullet preconditions (equipment state, prior phase complete, valves lined up, etc.)
+- steps: numbered operator instructions, each with:
+    - instruction: imperative action (e.g., "Navigate to PHASE_MIXEQUIL faceplate", "Set R_COND_SP to 14.5 via recipe parameter", "Initiate phase")
+    - expected: observable outcome (e.g., "AT-1001.PV stabilises within 14.5 ±0.5 mS/cm within 60 sec", "Phase transitions to S060")
+  Reference real tag names and DeltaV phase step IDs (S010, S020...) from the FHX where appropriate.
+- data_capture: 1-4 fields the tester records (each with field name, tag_reference, units)
+- acceptance: 1-sentence pass criterion
+
+Category-specific guidance:
+- functional: prove the happy-path sequence advances and produces correct final state
+- boundary: exercise recipe parameter at low limit / nominal / high limit; verify behaviour at each
+- alarm: force the alarm condition; verify alarm trips, batch enters safe state, operator notification
+- failure: simulate instrument fault / loss of comms / mid-step abort; verify graceful behaviour and audit-trail
+- hold_resume: invoke DeltaV phase HOLD then RESTART; verify state preserved and resumption correct
+- data_integrity: verify batch report captures the right parameters with correct units, timestamp, and electronic signature per ALCOA+
+
+Step count guidance: H-risk → 5-10 steps; M-risk → 3-6 steps; L-risk → 2-4 steps. Do NOT pad. Be concrete and reviewable.
+
+Return ONLY valid JSON (no markdown):
+{
+  "test_cases": [
+    {
+      "tc_id":"TC-FUNC-001-01",
+      "req_id":"REQ-FUNC-001",
+      "category":"functional",
+      "title":"...",
+      "prereqs":["..."],
+      "steps":[{"step":1,"instruction":"...","expected":"..."}],
+      "data_capture":[{"field":"...","tag_reference":"...","units":"..."}],
+      "acceptance":"..."
+    }
+  ]
+}`;
+
+    const stage2Input=`PHASE CONTEXT (summary):
+Phase: ${phase1.name}
+Key tags: ${(model.equipment_modules||[]).flatMap(em=>(em.instrumentation||[]).map(t=>t.tag)).join(', ')}
+Recipe params: ${params.map(p=>p.name).join(', ')}
+DeltaV phase steps (from FHX): S010 acquire EMs, S020+ process steps, final step uploads report.
+
+TEST CASES TO AUTHOR (write a body for every entry):
+${tcIndex.map(tc=>`- ${tc.tc_id} | category=${tc.category} (${tc.category_label}) | req=${tc.req_id} | risk=${tc.risk} | requirement: ${tc.req_text}`).join('\n')}
+
+Write all ${tcIndex.length} test case bodies. Be concise but concrete — every step references real tags or DeltaV constructs.`;
+
+    const r2=await claude(SYS_STAGE2, ctx+'\n\n'+stage2Input, 16000);
+    const stage2=parseJSON(r2);
+    state.cqTestCases=stage2.test_cases||[];
+
+    setP('pf-cq','pl-cq',100,'Complete.');
+    hide('prog-cq');
+
+    renderCQ();
+    showEditBar('cq');
+    setStep(6,'done');setStep(7,'active');
+    playDone();
+    showSection(7);
+  }catch(e){
+    hide('prog-cq');setStep(7,'');showErr('err-cq','C&Q generation failed: '+e.message);
+    console.error(e);
+  }finally{load('btn-cq',false)}
+}
+
+function renderCQ(){
+  const phase1=state.phases[0]||{name:'Phase 1'};
+  document.getElementById('cq-phase-name').textContent=phase1.name;
+
+  const risk=state.cqRisk||{requirements:[]};
+  const matrix=state.cqMatrix||[];
+  const tcs=state.cqTestCases||[];
+  const tcById={};tcs.forEach(t=>tcById[t.tc_id]=t);
+
+  const riskBadge=p=>{
+    const cls=p==='H'?'b-disable':p==='M'?'b-step':'b-enable';
+    return `<span class="badge ${cls}">${escH(p||'—')}</span>`;
+  };
+
+  // Intended Use / System Description / Test Strategy cards
+  const headerCards=`
+    <div class="card">
+      <div class="ch"><div class="cicon">U</div><div><div class="ctitle">Intended Use</div><div class="csub">What this phase does and why correct operation matters</div></div></div>
+      <div class="cbody"><div style="font-size:13px;line-height:1.65;color:var(--body)">${escH(risk.intended_use||'—').replace(/\n/g,'<br>')}</div></div>
+    </div>
+    <div class="card">
+      <div class="ch"><div class="cicon">S</div><div><div class="ctitle">System Description</div><div class="csub">Unit and equipment modules under test</div></div></div>
+      <div class="cbody"><div style="font-size:13px;line-height:1.65;color:var(--body)">${escH(risk.system_description||'—').replace(/\n/g,'<br>')}</div></div>
+    </div>
+    <div class="card">
+      <div class="ch"><div class="cicon">T</div><div><div class="ctitle">Test Strategy</div><div class="csub">CSA framing — scripted/unscripted balance, leveraged testing</div></div></div>
+      <div class="cbody"><div style="font-size:13px;line-height:1.65;color:var(--body)">${escH(risk.test_strategy||'—').replace(/\n/g,'<br>')}</div></div>
+    </div>`;
+
+  // Risk Assessment table
+  const riskRows=(risk.requirements||[]).map(r=>`
+    <tr id="row-${escH(r.req_id)}">
+      <td class="mono">${escH(r.req_id)}</td>
+      <td style="font-size:12px">${escH(r.text)}</td>
+      <td style="font-size:11.5px;color:var(--muted)">${escH(r.frs_source||'')}</td>
+      <td>${escH(r.impact_category||'')}</td>
+      <td>${escH(r.severity||'')}</td>
+      <td>${escH(r.likelihood||'')}</td>
+      <td>${riskBadge(r.risk_priority)}</td>
+      <td style="font-size:11.5px;color:var(--body);max-width:280px">${escH(r.critical_thinking_rationale||'')}</td>
+    </tr>`).join('')||'<tr><td colspan="8" style="color:var(--subtle);font-style:italic">No requirements extracted.</td></tr>';
+  const riskCard=`
+    <div class="card">
+      <div class="ch"><div class="cicon">R</div><div><div class="ctitle">Risk Assessment &amp; Critical Thinking Record</div><div class="csub">GAMP 5 two-axis scoring + CSA narrative rationale</div></div></div>
+      <div class="cbody"><table class="dt">
+        <thead><tr><th>REQ-ID</th><th>Requirement</th><th>FRS Source</th><th>Impact</th><th>Sev</th><th>Lik</th><th>Risk</th><th>Critical Thinking Rationale</th></tr></thead>
+        <tbody>${riskRows}</tbody></table></div>
+    </div>`;
+
+  // 2-D Trace Matrix
+  const catHdr=CQ_CATS.map(c=>`<th style="text-align:center">${escH(c.label)}</th>`).join('');
+  const matrixRows=matrix.map(row=>{
+    const req=(risk.requirements||[]).find(r=>r.req_id===row.req_id);
+    const cells=CQ_CATS.map(c=>{
+      const cell=row.cells?.[c.key];
+      if(!cell) return `<td style="text-align:center;color:var(--subtle)">—</td>`;
+      if(cell.tc_id) return `<td style="text-align:center"><a href="#tc-${escH(cell.tc_id)}" class="mono" style="color:var(--p);text-decoration:none;font-size:11px;font-weight:700">${escH(cell.tc_id)}</a></td>`;
+      if(cell.na) return `<td style="text-align:left;font-size:10.5px;color:var(--muted);font-style:italic;background:#FAF7FF">N/A — ${escH(cell.justification||'risk justified')}</td>`;
+      return `<td style="text-align:center;color:var(--subtle)">—</td>`;
+    }).join('');
+    return `<tr><td class="mono" style="font-weight:700">${escH(row.req_id)}</td><td>${riskBadge(req?.risk_priority)}</td>${cells}</tr>`;
+  }).join('')||`<tr><td colspan="${CQ_CATS.length+2}" style="color:var(--subtle);font-style:italic">No matrix rows.</td></tr>`;
+  const matrixCard=`
+    <div class="card">
+      <div class="ch"><div class="cicon">M</div><div><div class="ctitle">Traceability Matrix (Requirements × Test Categories)</div><div class="csub">Every cell is either a test case ID or a risk-justified N/A — that record is the CSA artifact</div></div></div>
+      <div class="cbody" style="overflow-x:auto"><table class="dt" style="min-width:980px">
+        <thead><tr><th>REQ-ID</th><th>Risk</th>${catHdr}</tr></thead>
+        <tbody>${matrixRows}</tbody></table></div>
+    </div>`;
+
+  // Test Cases
+  const tcCards=tcs.map(tc=>{
+    const stepsHtml=(tc.steps||[]).map(s=>`
+      <tr><td><span class="badge b-step">${s.step}</span></td><td>${escH(s.instruction)}</td><td style="color:var(--body)">${escH(s.expected||'')}</td><td style="background:#FAFAFC;width:60px">&nbsp;</td><td style="background:#FAFAFC;width:50px">&nbsp;</td></tr>`).join('');
+    const dcHtml=(tc.data_capture||[]).map(d=>`<tr><td>${escH(d.field)}</td><td class="mono">${escH(d.tag_reference||'')}</td><td>${escH(d.units||'')}</td><td style="background:#FAFAFC">&nbsp;</td></tr>`).join('');
+    const catLabel=(CQ_CATS.find(c=>c.key===tc.category)||{}).label||tc.category;
+    return `
+      <div class="card" id="tc-${escH(tc.tc_id)}">
+        <div class="ch"><div class="cicon" style="background:var(--mid)">T</div>
+          <div><div class="ctitle"><span class="mono" style="color:var(--p);font-size:12px">${escH(tc.tc_id)}</span> — ${escH(tc.title||'')}</div>
+            <div class="csub">${escH(catLabel)} · traces to <span class="mono">${escH(tc.req_id)}</span></div></div>
+          <span class="ctag">${escH(tc.category||'')}</span>
+        </div>
+        <div class="cbody" style="display:flex;flex-direction:column;gap:14px">
+          <div><div class="po-sublbl">Prerequisites</div>
+            <ul style="margin-left:18px;font-size:12.5px;color:var(--body)">${(tc.prereqs||[]).map(pr=>`<li>${escH(pr)}</li>`).join('')||'<li style="color:var(--subtle)">None</li>'}</ul></div>
+          <div><div class="po-sublbl">Test Steps</div>
+            <table class="dt"><thead><tr><th>#</th><th>Instruction</th><th>Expected Result</th><th>Actual</th><th>Init</th></tr></thead>
+            <tbody>${stepsHtml||'<tr><td colspan="5" style="color:var(--subtle);font-style:italic">No steps</td></tr>'}</tbody></table></div>
+          <div><div class="po-sublbl">Data Capture</div>
+            <table class="dt"><thead><tr><th>Field</th><th>Tag</th><th>Units</th><th>Recorded Value</th></tr></thead>
+            <tbody>${dcHtml||'<tr><td colspan="4" style="color:var(--subtle);font-style:italic">None</td></tr>'}</tbody></table></div>
+          <div><div class="po-sublbl">Acceptance Criterion</div>
+            <div style="font-size:12.5px;color:var(--body);background:var(--ice);border:1px solid var(--ice2);border-radius:5px;padding:9px 12px">${escH(tc.acceptance||'—')}</div></div>
+        </div>
+      </div>`;
+  }).join('')||'<div class="status-msg s-info">No test cases generated.</div>';
+
+  document.getElementById('cq-output').innerHTML =
+    headerCards + riskCard + matrixCard +
+    `<div style="margin:24px 0 14px"><div class="po-sublbl" style="font-size:12px">Test Cases (${tcs.length})</div></div>` +
+    tcCards;
+}
+
+async function downloadCQDocx(){
+  if(!window.docx){alert('docx.js not found — check it is in the same folder as index.html.');return}
+  if(!state.cqRisk||!state.cqMatrix||!state.cqTestCases){alert('Generate the C&Q protocol first.');return}
+  const btn=event.target;btn.disabled=true;btn.textContent='Building...';
+  const {Document,Paragraph,TextRun,Table,TableRow,TableCell,HeadingLevel,AlignmentType,BorderStyle,WidthType,ShadingType,Packer,PageBreak}=window.docx;
+  const phase1=state.phases[0]||{name:'Phase 1'};
+  const model=state.physModel||{};
+  const detail=state.frsPhase1?.detail||{};
+  const params=state.frsParams?.parameters||[];
+  const risk=state.cqRisk;
+  const matrix=state.cqMatrix;
+  const tcs=state.cqTestCases;
+  const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+  const PURPLE='7A00E6';
+
+  const h1=t=>new Paragraph({text:t,heading:HeadingLevel.HEADING_1,spacing:{before:320,after:100}});
+  const h2=t=>new Paragraph({children:[new TextRun({text:t,bold:true,color:PURPLE,size:24})],spacing:{before:200,after:70}});
+  const h3=t=>new Paragraph({children:[new TextRun({text:t,bold:true,size:22,color:'3D3050'})],spacing:{before:150,after:50}});
+  const p=t=>new Paragraph({children:[new TextRun({text:t||'',size:22,color:'3D3050'})],spacing:{after:70}});
+  const lp=(l,v)=>new Paragraph({children:[new TextRun({text:l+': ',bold:true,size:22}),new TextRun({text:v||'—',size:22,color:'3D3050'})],spacing:{after:55}});
+  const sp=()=>new Paragraph({text:'',spacing:{after:70}});
+  const pb=()=>new Paragraph({children:[new PageBreak()]});
+  const thc=t=>new TableCell({children:[new Paragraph({children:[new TextRun({text:t,bold:true,size:18})],alignment:AlignmentType.LEFT})],shading:{fill:'EDE0FF',type:ShadingType.CLEAR,color:'auto'}});
+  const tc=(t,opts={})=>new TableCell({children:[new Paragraph({children:[new TextRun({text:t||'—',size:20,color:'3D3050',...opts})],spacing:{before:40,after:40}})]});
+  const blankCell=()=>new TableCell({children:[new Paragraph({children:[new TextRun({text:' ',size:20})],spacing:{before:60,after:60}})],shading:{fill:'FAFAFC',type:ShadingType.CLEAR,color:'auto'}});
+  const mkTbl=(hdrs,rows)=>new Table({width:{size:100,type:WidthType.PERCENTAGE},rows:[
+    new TableRow({children:hdrs.map(h=>thc(h)),tableHeader:true}),
+    ...rows.map(row=>new TableRow({children:row.map(cell=>typeof cell==='object'&&cell&&cell._blank?blankCell():tc(String(cell==null?'—':cell)))}))
+  ]});
+  const sigBlock=()=>mkTbl(['Role','Printed Name','Signature','Date'],[
+    ['Author (Automation Engineer)',{_blank:true},{_blank:true},{_blank:true}],
+    ['Reviewer (Engineering SME)',{_blank:true},{_blank:true},{_blank:true}],
+    ['Approver (Quality)',{_blank:true},{_blank:true},{_blank:true}]
+  ]);
+
+  const children=[];
+
+  // ─── Cover / Pre-Approval ──
+  children.push(new Paragraph({children:[new TextRun({text:'COMMISSIONING & QUALIFICATION TEST PROTOCOL',bold:true,size:36,color:PURPLE})],alignment:AlignmentType.CENTER,spacing:{before:720,after:120}}));
+  children.push(new Paragraph({children:[new TextRun({text:'CSA-Aligned (FDA Computer Software Assurance, 2022)',italics:true,size:22,color:'7B6A96'})],alignment:AlignmentType.CENTER,spacing:{after:240}}));
+  children.push(new Paragraph({children:[new TextRun({text:(phase1.name||'Phase 1')+' — '+(model.unit||''),bold:true,size:26})],alignment:AlignmentType.CENTER,spacing:{after:360}}));
+  children.push(lp('Document No','CQ-'+Date.now().toString().slice(-6)));
+  children.push(lp('Revision','00'));
+  children.push(lp('Status','DRAFT — AI-Assisted, Pending Engineer Review'));
+  children.push(lp('Date',today));
+  children.push(lp('Unit',model.unit||'—'));
+  children.push(lp('Process Cell',model.process_cell||'—'));
+  children.push(lp('Phase Under Test',phase1.name||'—'));
+  children.push(sp());
+  children.push(new Paragraph({children:[new TextRun({text:'AI-generated draft. Review and approve before use as a controlled document. All tags, setpoints, and risk justifications require validation against the site instrument list, QMS, and SOPs. Site-specific role names, document numbers, and SOP references are placeholders.',italics:true,size:18,color:'7B6A96'})],spacing:{after:200}}));
+  children.push(h2('Pre-Approval'));
+  children.push(p('This protocol shall not be executed until all signatures below are obtained.'));
+  children.push(sigBlock());
+
+  // ─── Roles & Responsibilities ──
+  children.push(pb());
+  children.push(h1('1. Roles & Responsibilities'));
+  children.push(mkTbl(['Role','Responsibility'],[
+    ['Author (Automation Engineer)','Authored the protocol; ensures technical content reflects FRS and FHX as designed.'],
+    ['Reviewer (Engineering SME)','Independent technical review; confirms test cases adequately verify intended use.'],
+    ['Approver (Quality)','Approves the protocol against the site QMS; authorises execution.'],
+    ['Tester','Executes test cases on the equipment; records actual results, initials, date, and any deviations.']
+  ]));
+
+  // ─── Abbreviations ──
+  children.push(h1('2. Abbreviations'));
+  children.push(mkTbl(['Term','Definition'],[
+    ['CSA','Computer Software Assurance (FDA 2022 draft guidance)'],
+    ['C&Q','Commissioning & Qualification'],
+    ['DCS','Distributed Control System (DeltaV)'],
+    ['EM','Equipment Module (ISA-88)'],
+    ['FHX','DeltaV phase logic export file'],
+    ['FRS','Functional Requirements Specification'],
+    ['ISA-88','Batch control standard'],
+    ['REQ-ID','Requirement identifier'],
+    ['TC-ID','Test case identifier'],
+    ['ALCOA+','Data integrity principles: Attributable, Legible, Contemporaneous, Original, Accurate, plus Complete, Consistent, Enduring, Available']
+  ]));
+
+  // ─── References ──
+  children.push(h1('3. Reference Documents'));
+  children.push(mkTbl(['Reference','Description'],[
+    ['FRS — '+(phase1.name||'Phase 1'),'Functional Requirements Specification, generated upstream in ATLAS'],
+    ['Phase FHX','DeltaV phase logic, generated upstream in ATLAS'],
+    ['FDA CSA Draft Guidance (Sept 2022)','Computer Software Assurance for Production and Quality System Software'],
+    ['GAMP 5 (2nd Ed.)','A Risk-Based Approach to Compliant GxP Computerized Systems'],
+    ['ISA-88.01','Batch control — Part 1: Models and terminology'],
+    ['Site QMS / SOPs','To be inserted by site QA (placeholder)']
+  ]));
+
+  // ─── Intended Use ──
+  children.push(h1('4. Intended Use'));
+  (risk.intended_use||'—').split(/\n\n+/).forEach(par=>children.push(p(par)));
+
+  // ─── System Description ──
+  children.push(h1('5. System Description'));
+  (risk.system_description||'—').split(/\n\n+/).forEach(par=>children.push(p(par)));
+  children.push(sp());
+  children.push(h3('Equipment Modules Under Test'));
+  children.push(mkTbl(['EM Tag','Name','Description','Key Tags'],
+    (model.equipment_modules||[]).map(em=>[em.tag,em.name,em.description,(em.instrumentation||[]).map(t=>t.tag).join(', ')])));
+
+  // ─── Risk Assessment ──
+  children.push(h1('6. Risk Assessment & Critical Thinking Record'));
+  children.push(p('Hybrid model: GAMP 5 two-axis Impact × Likelihood scoring with a CSA-style critical-thinking rationale per requirement. Risk priority drives the number of test categories applied to each requirement.'));
+  children.push(mkTbl(['REQ-ID','Requirement','FRS Source','Impact Category','Sev','Lik','Risk','Critical Thinking Rationale'],
+    (risk.requirements||[]).map(r=>[r.req_id,r.text,r.frs_source||'',r.impact_category||'',r.severity||'',r.likelihood||'',r.risk_priority||'',r.critical_thinking_rationale||''])));
+
+  // ─── Test Strategy ──
+  children.push(h1('7. Test Strategy'));
+  (risk.test_strategy||'—').split(/\n\n+/).forEach(par=>children.push(p(par)));
+  children.push(sp());
+  children.push(p('Depth modulation by risk priority: H → all 6 test categories; M → Functional + Boundary + Alarm; L → Functional only. Categories marked N/A in the trace matrix carry a one-line risk justification, which is the CSA critical-thinking artifact.'));
+
+  // ─── Trace Matrix ──
+  children.push(h1('8. Traceability Matrix'));
+  children.push(p('Rows = REQ-IDs (from §6). Columns = the six fixed test categories. Each cell is either a TC-ID (whose body is in §9) or "N/A —" followed by a risk-based justification.'));
+  const matrixHdrs=['REQ-ID','Risk',...CQ_CATS.map(c=>c.label)];
+  const matrixData=matrix.map(row=>{
+    const req=(risk.requirements||[]).find(r=>r.req_id===row.req_id);
+    return [row.req_id, req?.risk_priority||'', ...CQ_CATS.map(c=>{
+      const cell=row.cells?.[c.key];
+      if(!cell) return '—';
+      if(cell.tc_id) return cell.tc_id;
+      if(cell.na) return 'N/A — '+(cell.justification||'risk justified');
+      return '—';
+    })];
+  });
+  children.push(mkTbl(matrixHdrs,matrixData));
+
+  // ─── Test Cases ──
+  children.push(h1('9. Test Cases'));
+  children.push(p('Each test case is executed on the equipment by a qualified tester. Tester records the Actual Result, Initials, Date/Time, and Deviation # (if any) in the spaces provided.'));
+  tcs.forEach(t=>{
+    children.push(h3(t.tc_id+' — '+(t.title||'')));
+    children.push(lp('Category',(CQ_CATS.find(c=>c.key===t.category)||{}).label||t.category||''));
+    children.push(lp('Traces to',t.req_id));
+    if((t.prereqs||[]).length){
+      children.push(h3('Prerequisites'));
+      t.prereqs.forEach(pr=>children.push(new Paragraph({children:[new TextRun({text:'• '+pr,size:22,color:'3D3050'})],spacing:{after:40}})));
+    }
+    children.push(h3('Test Steps'));
+    children.push(mkTbl(['#','Instruction','Expected Result','Actual Result','Initials / Date'],
+      (t.steps||[]).map(s=>[String(s.step),s.instruction||'',s.expected||'',{_blank:true},{_blank:true}])));
+    if((t.data_capture||[]).length){
+      children.push(h3('Data Capture'));
+      children.push(mkTbl(['Field','Tag Reference','Units','Recorded Value'],
+        t.data_capture.map(d=>[d.field||'',d.tag_reference||'',d.units||'',{_blank:true}])));
+    }
+    children.push(lp('Acceptance Criterion',t.acceptance||'—'));
+    children.push(lp('Pass / Fail',''));
+    children.push(lp('Deviation # (if applicable)',''));
+    children.push(sp());
+  });
+
+  // ─── Deviations Log ──
+  children.push(pb());
+  children.push(h1('10. Deviations Log'));
+  children.push(p('Record all deviations encountered during execution. Each deviation requires resolution prior to protocol close-out.'));
+  children.push(mkTbl(['Dev #','TC-ID','Date','Description','Root Cause / Resolution','Closed By'],[
+    [{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true}],
+    [{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true}],
+    [{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true}],
+    [{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true}],
+    [{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true},{_blank:true}]
+  ]));
+
+  // ─── Post-Execution Approval ──
+  children.push(h1('11. Post-Execution Approval'));
+  children.push(p('All test cases executed, all deviations resolved, and the system performs as intended.'));
+  children.push(sigBlock());
+
+  // ─── Appendix A: Requirements ──
+  children.push(pb());
+  children.push(h1('Appendix A — Requirements Reference'));
+  children.push(p('Single source of truth for requirement text inside this protocol. Sourced from the upstream FRS. If the FRS is revised, regenerate this protocol.'));
+  children.push(h3('Recipe Parameters'));
+  if(params.length) children.push(mkTbl(['Parameter','Description','Units','Typical Value','Type'],params.map(p=>[p.name,p.description,p.units,p.typical_value,p.type])));
+  children.push(h3('Sequence of Events'));
+  const soe=detail.sequence_of_events||[];
+  if(soe.length) children.push(mkTbl(['Step','Action','Notes'],soe.map(s=>[String(s.step),s.action,s.notes||''])));
+  children.push(h3('Critical Alarms'));
+  const allAlarms=[...(detail.critical_alarms?.enable||[]).map(a=>['ENABLE',a.alarm,a.description,a.reason||'']),...(detail.critical_alarms?.disable||[]).map(a=>['DISABLE',a.alarm,a.description,a.reason||''])];
+  if(allAlarms.length) children.push(mkTbl(['Action','Alarm Tag','Description','Reason'],allAlarms));
+  children.push(h3('Report Parameters'));
+  const rp=detail.report_parameters||[];
+  if(rp.length) children.push(mkTbl(['Parameter','Description','Units','Tag Reference','Capture Point'],rp.map(r=>[r.parameter,r.description,r.units||'',r.tag_reference||'',r.capture_point||''])));
+  children.push(h3('Hold Monitors'));
+  const hm=detail.hold_monitors||[];
+  if(hm.length) children.push(mkTbl(['Monitor','Tag Reference','Hold Condition','Action'],hm.map(h=>[h.monitor,h.tag_reference||'',h.condition,h.action||''])));
+  children.push(h3('Requirements (from §6)'));
+  children.push(mkTbl(['REQ-ID','Requirement','FRS Source'],(risk.requirements||[]).map(r=>[r.req_id,r.text,r.frs_source||''])));
+
+  const doc=new Document({creator:'ATLAS — AI Draft',title:'C&Q Protocol — '+(phase1.name||'Phase 1'),sections:[{children}]});
+  const blob=await Packer.toBlob(doc);
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download='CQ_Protocol_'+(phase1.name||'Phase1').replace(/\s+/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.docx';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+  btn.disabled=false;btn.textContent='Download C&Q .docx';
+}
+
 // ─── Reset ────────────────────────────────────────────────────────────────────
 function loadDevState(){
   // Pre-populate state with synthetic mix/equil data — jump straight to FHX step
@@ -1560,13 +2149,14 @@ function toggleEdit(section){
   if(isOpen){
     wrap.classList.remove('visible');
     btn.classList.remove('active');
-    btn.textContent='✎ Edit '+(section==='phys'?'Physical Model':section==='seq'?'Phase Sequence':'FRS Content');
+    btn.textContent='✎ Edit '+(section==='phys'?'Physical Model':section==='seq'?'Phase Sequence':section==='cq'?'C&Q Content':'FRS Content');
   } else {
     // Populate textarea with current state
     let data;
     if(section==='phys') data=state.physModel;
     else if(section==='seq') data=state.phaseSeq;
     else if(section==='frs') data={params:state.frsParams,phase:state.frsPhase1};
+    else if(section==='cq') data={risk:state.cqRisk,matrix:state.cqMatrix,testCases:state.cqTestCases};
     document.getElementById('json-'+section).value=JSON.stringify(data,null,2);
     document.getElementById('json-err-'+section).style.display='none';
     wrap.classList.add('visible');
@@ -1596,6 +2186,11 @@ function applyEdit(section){
     if(parsed.phase) state.frsPhase1=parsed.phase;
     const ph1=state.phases[0]||{name:'Phase 1'};
     renderFRS(ph1,state.frsParams||{parameters:[]},state.frsPhase1?.detail||{});
+  } else if(section==='cq'){
+    if(parsed.risk) state.cqRisk=parsed.risk;
+    if(parsed.matrix) state.cqMatrix=parsed.matrix;
+    if(parsed.testCases) state.cqTestCases=parsed.testCases;
+    renderCQ();
   }
   // Close the editor after apply
   toggleEdit(section);
@@ -1643,8 +2238,8 @@ function closeApiModal(e){
 }
 
 function resetAll(){
-  state={narrative:'',phases:[],physModel:null,phaseSeq:null,frsPhase1:null,frsParams:null,fhxText:''};
-  for(let i=1;i<=6;i++)setStep(i,i===1?'active':'');
+  state={narrative:'',phases:[],physModel:null,phaseSeq:null,frsPhase1:null,frsParams:null,fhxText:'',cqRisk:null,cqMatrix:null,cqTestCases:null};
+  for(let i=1;i<=7;i++)setStep(i,i===1?'active':'');
   showSection(1);
 }
 
